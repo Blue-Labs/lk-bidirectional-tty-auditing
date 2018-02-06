@@ -1,0 +1,238 @@
+--- drivers/tty/n_tty.c.bk	2018-02-06 00:40:16.732192174 -0500
++++ drivers/tty/n_tty.c	2018-02-06 01:15:36.881742820 -0500
+@@ -160,7 +160,7 @@
+ 	int uncopied;
+ 
+ 	if (n > size) {
+-		tty_audit_add_data(tty, from, size);
++		tty_audit_add_data(tty, from, size, 0);
+ 		uncopied = copy_to_user(to, from, size);
+ 		if (uncopied)
+ 			return uncopied;
+@@ -169,7 +169,7 @@
+ 		from = ldata->read_buf;
+ 	}
+ 
+-	tty_audit_add_data(tty, from, n);
++	tty_audit_add_data(tty, from, n, 0);
+ 	return copy_to_user(to, from, n);
+ }
+ 
+@@ -1957,7 +1957,7 @@
+ 		retval = copy_to_user(*b, from, n);
+ 		n -= retval;
+ 		is_eof = n == 1 && *from == EOF_CHAR(tty);
+-		tty_audit_add_data(tty, from, n);
++		tty_audit_add_data(tty, from, n, 0);
+ 		smp_store_release(&ldata->read_tail, ldata->read_tail + n);
+ 		/* Turn single EOF into zero-length read */
+ 		if (L_EXTPROC(tty) && ldata->icanon && is_eof &&
+@@ -2299,6 +2299,7 @@
+ 			retval = -EIO;
+ 			break;
+ 		}
++                tty_audit_add_data(tty, (unsigned char *)b, nr, 1);
+ 		if (O_OPOST(tty)) {
+ 			while (nr > 0) {
+ 				ssize_t num = process_output_block(tty, b, nr);
+--- drivers/tty/tty_audit.c.bk	2018-02-06 01:22:08.486053931 -0500
++++ drivers/tty/tty_audit.c	2018-02-06 02:40:18.720809870 -0500
+@@ -17,8 +17,8 @@
+ 	struct mutex mutex;	/* Protects all data below */
+ 	dev_t dev;		/* The TTY which the data is from */
+ 	unsigned icanon:1;
+-	size_t valid;
+-	unsigned char *data;	/* Allocated size N_TTY_BUF_SIZE */
++	size_t valid[2];
++	unsigned char *data[2];	/* Allocated size N_TTY_BUF_SIZE */
+ };
+ 
+ static struct tty_audit_buf *tty_audit_buf_ref(void)
+@@ -37,16 +37,23 @@
+ 	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
+ 	if (!buf)
+ 		goto err;
+-	buf->data = kmalloc(N_TTY_BUF_SIZE, GFP_KERNEL);
+-	if (!buf->data)
++	buf->data[0] = kmalloc(N_TTY_BUF_SIZE, GFP_KERNEL);
++	buf->data[1] = kmalloc(N_TTY_BUF_SIZE, GFP_KERNEL);
++	if (!buf->data[0] || !buf->data[1])
+ 		goto err_buf;
+ 	mutex_init(&buf->mutex);
+ 	buf->dev = MKDEV(0, 0);
+ 	buf->icanon = 0;
+-	buf->valid = 0;
++	buf->valid[0] = 0;
++	buf->valid[1] = 0;
+ 	return buf;
+ 
+ err_buf:
++        if (buf->data[0])
++                kfree(buf->data[0]);
++        if (buf->data[1])
++                kfree(buf->data[1]);
++
+ 	kfree(buf);
+ err:
+ 	return NULL;
+@@ -54,13 +61,15 @@
+ 
+ static void tty_audit_buf_free(struct tty_audit_buf *buf)
+ {
+-	WARN_ON(buf->valid != 0);
+-	kfree(buf->data);
++	WARN_ON(buf->valid[0] != 0);
++	kfree(buf->data[0]);
++	WARN_ON(buf->valid[1] != 0);
++	kfree(buf->data[1]);
+ 	kfree(buf);
+ }
+ 
+ static void tty_audit_log(const char *description, dev_t dev,
+-			  unsigned char *data, size_t size)
++			  unsigned char *data, size_t size, unsigned rw)
+ {
+ 	struct audit_buffer *ab;
+ 	struct task_struct *tsk = current;
+@@ -68,13 +77,14 @@
+ 	uid_t uid = from_kuid(&init_user_ns, task_uid(tsk));
+ 	uid_t loginuid = from_kuid(&init_user_ns, audit_get_loginuid(tsk));
+ 	unsigned int sessionid = audit_get_sessionid(tsk);
++        char *direction[2]={"stdin","stdout"};
+ 
+ 	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_TTY);
+ 	if (ab) {
+ 		char name[sizeof(tsk->comm)];
+ 
+-		audit_log_format(ab, "%s pid=%u uid=%u auid=%u ses=%u major=%d"
+-				 " minor=%d comm=", description, pid, uid,
++		audit_log_format(ab, "%s rw=%s pid=%u uid=%u auid=%u ses=%u major=%d"
++				 " minor=%d comm=", description, direction[rw], pid, uid,
+ 				 loginuid, sessionid, MAJOR(dev), MINOR(dev));
+ 		get_task_comm(name, tsk);
+ 		audit_log_untrustedstring(ab, name);
+@@ -90,16 +100,16 @@
+  *	Generate an audit message from the contents of @buf, which is owned by
+  *	the current task.  @buf->mutex must be locked.
+  */
+-static void tty_audit_buf_push(struct tty_audit_buf *buf)
++static void tty_audit_buf_push(struct tty_audit_buf *buf, unsigned rw)
+ {
+-	if (buf->valid == 0)
++	if (buf->valid[rw] == 0)
+ 		return;
+ 	if (audit_enabled == 0) {
+-		buf->valid = 0;
++		buf->valid[rw] = 0;
+ 		return;
+ 	}
+-	tty_audit_log("tty", buf->dev, buf->data, buf->valid);
+-	buf->valid = 0;
++	tty_audit_log("tty", buf->dev, buf->data[rw], buf->valid[rw], rw);
++	buf->valid[rw] = 0;
+ }
+ 
+ /**
+@@ -119,8 +129,10 @@
+ 	if (!buf)
+ 		return;
+ 
+-	tty_audit_buf_push(buf);
+-	tty_audit_buf_free(buf);
++	tty_audit_buf_push(buf, 0);
++	tty_audit_buf_push(buf, 1);
++	tty_audit_buf_free(buf, 0);
++	tty_audit_buf_free(buf, 1);
+ }
+ 
+ /**
+@@ -145,7 +157,7 @@
+ 		return;
+ 
+ 	if (audit_enabled)
+-		tty_audit_log("ioctl=TIOCSTI", dev, &ch, 1);
++		tty_audit_log("ioctl=TIOCSTI", dev, &ch, 1, 0);
+ }
+ 
+ /**
+@@ -163,7 +175,8 @@
+ 	buf = tty_audit_buf_ref();
+ 	if (!IS_ERR_OR_NULL(buf)) {
+ 		mutex_lock(&buf->mutex);
+-		tty_audit_buf_push(buf);
++		tty_audit_buf_push(buf, 0);
++		tty_audit_buf_push(buf, 1);
+ 		mutex_unlock(&buf->mutex);
+ 	}
+ 	return 0;
+@@ -201,12 +214,13 @@
+  *
+  *	Audit @data of @size from @tty, if necessary.
+  */
+-void tty_audit_add_data(struct tty_struct *tty, const void *data, size_t size)
++void tty_audit_add_data(struct tty_struct *tty, const void *data, size_t size, unsigned rw)
+ {
+ 	struct tty_audit_buf *buf;
+ 	unsigned int icanon = !!L_ICANON(tty);
+ 	unsigned int audit_tty;
+ 	dev_t dev;
++	int _cr;
+ 
+ 	audit_tty = READ_ONCE(current->signal->audit_tty);
+ 	if (~audit_tty & AUDIT_TTY_ENABLE)
+@@ -229,22 +243,30 @@
+ 	mutex_lock(&buf->mutex);
+ 	dev = MKDEV(tty->driver->major, tty->driver->minor_start) + tty->index;
+ 	if (buf->dev != dev || buf->icanon != icanon) {
+-		tty_audit_buf_push(buf);
++		tty_audit_buf_push(buf, rw);
+ 		buf->dev = dev;
+ 		buf->icanon = icanon;
+ 	}
+ 	do {
+ 		size_t run;
+ 
+-		run = N_TTY_BUF_SIZE - buf->valid;
++		run = N_TTY_BUF_SIZE - buf->valid[rw];
+ 		if (run > size)
+ 			run = size;
+-		memcpy(buf->data + buf->valid, data, run);
+-		buf->valid += run;
++		memcpy(buf->data[rw] + buf->valid[rw], data, run);
++		buf->valid[rw] += run;
+ 		data += run;
+ 		size -= run;
+-		if (buf->valid == N_TTY_BUF_SIZE)
+-			tty_audit_buf_push(buf);
++		if (buf->valid[rw] == N_TTY_BUF_SIZE) {
++			tty_audit_buf_push(buf, rw);
++		}
+ 	} while (size != 0);
++	for (_cr=buf->valid[rw]; _cr>0; _cr--) {
++		if (buf->data[rw][_cr-1] == '\r' || buf->data[rw][_cr-1] == '\n') {
++			tty_audit_buf_push(buf, rw);
++			break;
++		}
++	}
++
+ 	mutex_unlock(&buf->mutex);
+ }
+--- include/linux/tty.h.bk	2018-02-06 01:39:17.396774070 -0500
++++ include/linux/tty.h	2018-02-06 01:39:57.075514753 -0500
+@@ -714,14 +714,14 @@
+ /* tty_audit.c */
+ #ifdef CONFIG_AUDIT
+ extern void tty_audit_add_data(struct tty_struct *tty, const void *data,
+-			       size_t size);
++			       size_t size, unsigned rw);
+ extern void tty_audit_exit(void);
+ extern void tty_audit_fork(struct signal_struct *sig);
+ extern void tty_audit_tiocsti(struct tty_struct *tty, char ch);
+ extern int tty_audit_push(void);
+ #else
+ static inline void tty_audit_add_data(struct tty_struct *tty, const void *data,
+-				      size_t size)
++				      size_t size, unsigned rw)
+ {
+ }
+ static inline void tty_audit_tiocsti(struct tty_struct *tty, char ch)
