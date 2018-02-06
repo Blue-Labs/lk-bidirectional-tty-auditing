@@ -1,16 +1,16 @@
-This patch supplements the TTY audit function in the Linux kernel.  The
+This patch supplements the TTY audit function in the `Linux Kernel`.  The
 existing auditing capabilities only record half of the TTY conversation. 
 This leads to lost data for two situations:
 
 * We cannot see what the user sent to the TTY, only what the TTY sends to them
-* if the TTY user turns off echo (stty), the built in auditing records nothing
+* if the TTY user turns off echo (stty -echo), the built in auditing records nothing
 
 Bidirectional record logging provided by this patch records all TTY data in
-both channels (stderr and stdout are in the same channels) and records data
-even when stty -echo is used.  All byte data is recorded, including all
+both channels (stderr and stdout are in the same channel) and records data
+even when `stty -echo` is used.  All byte data is recorded, including all
 control characters.
 
-A simple python script is included for printing a strong representation of
+A simple `python` script is included for printing a strong representation of
 actual TTY appearance on the user's terminal.
 
 example `audit-log-print.py` output:
