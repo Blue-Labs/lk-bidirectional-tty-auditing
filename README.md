@@ -3,7 +3,7 @@ existing auditing capabilities only record half of the TTY conversation.
 This leads to lost data for two situations:
 
 * We cannot see what the user sent to the TTY, only what the TTY sends to them
-* if the TTY user turns off echo (stty -echo), the built in auditing records nothing
+* If the TTY user turns off echo (stty -echo), the built in auditing records nothing
 
 Bidirectional record logging provided by this patch records all TTY data in
 both channels (stderr and stdout are in the same channel) and records data
@@ -16,7 +16,7 @@ actual TTY appearance on the user's terminal.
 example `audit-log-print.py` output:
 
 ```
-┌[✓  Mon Feb 05 21:18 root@hive-poc  [~]
+┌[✓  Mon Feb 05 21:18 root@ak  [~]
 └─>cat /var/log/audit/audit.log|python audit-log-print.py 
 ◀ david              1452827555.543┆ Last login: Thu Jan 14 21:58:21 2016 from 127.0.0.1↩↲
 ▶ david              1452827561.176┆ w↩
@@ -33,3 +33,8 @@ example `audit-log-print.py` output:
 ◀ david              1452827562.613┆ logout↲
 ■ non-root           1467310857.488┆ ❎
 ```
+
+**Note:** on some distributions such as Arch Linux, _audit_ functions don't
+come by default. Specifically, you'll need to install the audit package and
+likely need to rebuild Linux-PAM package (core/pam) and make sure it's built
+with the _--enable-audit_ flag.
