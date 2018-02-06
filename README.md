@@ -10,7 +10,7 @@ both channels (stderr and stdout are in the same channel) and records data
 even when `stty -echo` is used.  All byte data is recorded, including all
 control characters.
 
-A simple `python` script is included for printing a strong representation of
+A simple `Python 3` script is included for printing a strong representation of
 actual TTY appearance on the user's terminal.
 
 example `audit-log-print.py` output:
